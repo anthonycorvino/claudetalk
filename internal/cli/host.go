@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/corvino/claudetalk/internal/runner"
 	"github.com/corvino/claudetalk/internal/server"
 	"github.com/spf13/cobra"
 )
@@ -45,7 +46,12 @@ func runHost(port int) error {
 		return fmt.Errorf("create file store: %w", err)
 	}
 
-	srv := server.New(hub, addr, fileStore)
+	serverURL := fmt.Sprintf("http://localhost:%d", port)
+	r := runner.New(runner.Config{
+		ServerURL: serverURL,
+	})
+
+	srv := server.New(hub, addr, fileStore, r)
 
 	go func() {
 		log.Printf("Starting ClaudeTalk server on port %d...", port)

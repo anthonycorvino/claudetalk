@@ -3,17 +3,21 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/corvino/claudetalk/internal/protocol"
+	"github.com/corvino/claudetalk/internal/runner"
+	"github.com/corvino/claudetalk/internal/synopsis"
 )
 
 // Handlers holds references needed by HTTP handlers.
 type Handlers struct {
 	Hub       *Hub
 	FileStore *FileStore
+	Runner    *runner.Runner
 	StartTime time.Time
 }
 
@@ -287,4 +291,139 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// SpawnClaude handles POST /api/rooms/{room}/spawn.
+func (h *Handlers) SpawnClaude(w http.ResponseWriter, r *http.Request) {
+	if h.Runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "Claude runner not configured")
+		return
+	}
+
+	roomName := r.PathValue("room")
+	if roomName == "" {
+		writeError(w, http.StatusBadRequest, "room name required")
+		return
+	}
+
+	var req struct {
+		Sender string `json:"sender"`
+		Prompt string `json:"prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+		return
+	}
+	if req.Sender == "" || req.Prompt == "" {
+		writeError(w, http.StatusBadRequest, "sender and prompt required")
+		return
+	}
+
+	room := h.Hub.GetOrCreateRoom(roomName)
+	claudeName := req.Sender + "'s Claude"
+
+	// Try to start a session.
+	_, cancel, err := h.Runner.Sessions().Start(roomName, req.Sender)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	// Post "thinking" system message.
+	room.AddMessage("system", protocol.TypeSystem, protocol.Payload{
+		Text: claudeName + " is thinking...",
+	}, nil)
+
+	// Track Claude as participant during session.
+	room.TrackParticipant(claudeName, "claude", nil)
+
+	// Launch local Claude Code process in background.
+	go func() {
+		defer cancel()
+		defer h.Runner.Sessions().End(roomName, req.Sender)
+		defer room.UntrackParticipant(claudeName)
+
+		params := runner.SpawnParams{
+			Room:   roomName,
+			Sender: req.Sender,
+			Prompt: req.Prompt,
+		}
+
+		if err := h.Runner.Spawn(params); err != nil {
+			log.Printf("spawn error room=%s sender=%s: %v", roomName, req.Sender, err)
+			room.AddMessage("system", protocol.TypeSystem, protocol.Payload{
+				Text: claudeName + " encountered an error: " + err.Error(),
+			}, nil)
+		}
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "spawning", "claude": claudeName})
+}
+
+// StopClaude handles POST /api/rooms/{room}/stop.
+func (h *Handlers) StopClaude(w http.ResponseWriter, r *http.Request) {
+	if h.Runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "Claude runner not configured")
+		return
+	}
+
+	roomName := r.PathValue("room")
+	if roomName == "" {
+		writeError(w, http.StatusBadRequest, "room name required")
+		return
+	}
+
+	var req struct {
+		Sender string `json:"sender"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+		return
+	}
+	if req.Sender == "" {
+		writeError(w, http.StatusBadRequest, "sender required")
+		return
+	}
+
+	if err := h.Runner.Sessions().Stop(roomName, req.Sender); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	room := h.Hub.GetRoom(roomName)
+	if room != nil {
+		room.AddMessage("system", protocol.TypeSystem, protocol.Payload{
+			Text: req.Sender + "'s Claude was stopped",
+		}, nil)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+// GenerateSynopsis handles POST /api/rooms/{room}/synopsis.
+func (h *Handlers) GenerateSynopsis(w http.ResponseWriter, r *http.Request) {
+	roomName := r.PathValue("room")
+	if roomName == "" {
+		writeError(w, http.StatusBadRequest, "room name required")
+		return
+	}
+
+	room := h.Hub.GetRoom(roomName)
+	if room == nil {
+		writeError(w, http.StatusNotFound, "room not found")
+		return
+	}
+
+	msgs := room.LatestMessages(1000)
+	if len(msgs) == 0 {
+		writeError(w, http.StatusNotFound, "no messages in room")
+		return
+	}
+
+	content := synopsis.Build(roomName, msgs)
+
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", roomName+"-synopsis.md"))
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(content))
 }

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClaudeTalk</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Join Screen -->
+    <div id="join-screen" class="join-screen">
+        <div class="join-card">
+            <h1>ClaudeTalk</h1>
+            <p class="subtitle">Multi-agent chatroom</p>
+            <form id="join-form" autocomplete="off">
+                <label for="room-input">Room</label>
+                <input type="text" id="room-input" placeholder="e.g. lobby" required autofocus>
+                <label for="name-input">Your Name</label>
+                <input type="text" id="name-input" placeholder="e.g. alice" required>
+                <button type="submit">Join Room</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Chat Screen -->
+    <div id="chat-screen" class="chat-screen hidden">
+        <!-- Sidebar -->
+        <aside id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <h2 id="room-title">Room</h2>
+            </div>
+            <div class="sidebar-section">
+                <h3>Participants</h3>
+                <ul id="participant-list"></ul>
+            </div>
+            <div class="sidebar-section">
+                <h3>Files</h3>
+                <ul id="file-list"><li class="muted">No files shared</li></ul>
+            </div>
+            <div class="sidebar-actions">
+                <button id="synopsis-btn" class="btn-secondary" title="Download conversation synopsis">Synopsis</button>
+                <button id="leave-btn" class="btn-danger" title="Leave room">Leave</button>
+            </div>
+        </aside>
+
+        <!-- Main Chat -->
+        <main class="chat-main">
+            <div id="messages" class="messages"></div>
+            <div class="input-area">
+                <div class="input-row">
+                    <input type="text" id="msg-input" placeholder="Send a message..." autocomplete="off">
+                    <button id="send-btn" title="Send message">Send</button>
+                </div>
+                <div class="input-row claude-row">
+                    <input type="text" id="claude-input" placeholder="Ask your Claude..." autocomplete="off">
+                    <button id="claude-btn" title="Ask Claude">Ask Claude</button>
+                    <button id="stop-btn" class="btn-danger hidden" title="Stop Claude">Stop</button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

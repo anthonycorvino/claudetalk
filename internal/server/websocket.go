@@ -66,9 +66,7 @@ func (c *Client) sendRaw(v any) {
 func (c *Client) readPump() {
 	defer func() {
 		c.room.UnregisterClient(c)
-		if c.mode == "daemon" {
-			c.room.UntrackParticipant(c.sender)
-		}
+		c.room.UntrackParticipant(c.sender)
 		c.conn.Close()
 	}()
 	c.conn.SetReadLimit(maxMsgSize)
@@ -182,10 +180,8 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, roomName, sender 
 	}
 	room.RegisterClient(client)
 
-	// Track participant for daemon clients.
-	if mode == "daemon" {
-		room.TrackParticipant(sender, role, client)
-	}
+	// Track all clients as participants.
+	room.TrackParticipant(sender, role, client)
 
 	// Announce join.
 	room.AddMessage("system", protocol.TypeSystem, protocol.Payload{

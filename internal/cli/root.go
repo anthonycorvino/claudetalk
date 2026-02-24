@@ -53,6 +53,7 @@ func newRootCmd() *cobra.Command {
 		newDigestCmd(),
 		newMCPServeCmd(),
 		newDaemonCmd(),
+		newWebCmd(),
 	)
 
 	return root
