@@ -25,12 +25,13 @@ var upgrader = websocket.Upgrader{
 
 // Client represents a WebSocket connection in a room.
 type Client struct {
-	room   *Room
-	conn   *websocket.Conn
-	send   chan protocol.Envelope
-	sender string
-	mode   string // "legacy" or "daemon"
-	role   string // "daemon", "user", etc.
+	room    *Room
+	conn    *websocket.Conn
+	send    chan protocol.Envelope
+	rawSend chan []byte // raw JSON frames; all writes go through writePump
+	sender  string
+	mode    string // "legacy" or "daemon"
+	role    string // "daemon", "user", etc.
 }
 
 // Send queues an envelope for delivery to this client.
@@ -47,19 +48,21 @@ func (c *Client) SendEvent(event protocol.ServerEvent) {
 	if c.mode != "daemon" {
 		return
 	}
-	// We encode the ServerEvent as a special envelope with the event data in metadata.
-	// Actually, daemon clients get ServerEvent JSON directly via sendRaw.
 	c.sendRaw(event)
 }
 
-// sendRaw sends an arbitrary JSON value to the client.
+// sendRaw queues an arbitrary JSON value for delivery via writePump.
+// Safe to call from any goroutine.
 func (c *Client) sendRaw(v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
-	c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	c.conn.WriteMessage(websocket.TextMessage, data)
+	select {
+	case c.rawSend <- data:
+	default:
+		// Client too slow; drop.
+	}
 }
 
 // readPump reads messages from the WebSocket and posts them to the room.
@@ -148,6 +151,14 @@ func (c *Client) writePump() {
 					dc.sendRaw(spawnEvent)
 				}
 			}
+		case data, ok := <-c.rawSend:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if !ok {
+				return
+			}
+			if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				return
+			}
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -176,12 +187,13 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, roomName, sender 
 
 	room := hub.GetOrCreateRoom(roomName)
 	client := &Client{
-		room:   room,
-		conn:   conn,
-		send:   make(chan protocol.Envelope, 256),
-		sender: sender,
-		mode:   mode,
-		role:   role,
+		room:    room,
+		conn:    conn,
+		send:    make(chan protocol.Envelope, 256),
+		rawSend: make(chan []byte, 64),
+		sender:  sender,
+		mode:    mode,
+		role:    role,
 	}
 	room.RegisterClient(client)
 

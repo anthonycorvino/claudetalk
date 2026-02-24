@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -341,6 +342,8 @@ func startWatcher(remote *url.URL, room, sender string, rnr *runner.Runner, done
 }
 
 // runWatcherConn runs a single WebSocket connection for the watcher.
+// When a spawn event arrives while a session is already active for that conv_id,
+// the latest spawn request is queued and replayed once the active session ends.
 func runWatcherConn(wsURL, room, sender, claudeName string, rnr *runner.Runner, done <-chan struct{}) error {
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -349,6 +352,52 @@ func runWatcherConn(wsURL, room, sender, claudeName string, rnr *runner.Runner, 
 	defer conn.Close()
 
 	log.Printf("watcher connected: %s in room %s", claudeName, room)
+
+	// pendingSpawns holds the latest queued spawn per conv_id when a session is active.
+	var pendingMu sync.Mutex
+	pendingSpawns := map[string]*protocol.SpawnReq{}
+
+	// trySpawn attempts to start a Claude session for the given conv_id.
+	// If a session is already active, the request is queued and will be replayed
+	// automatically when the active session ends.
+	var trySpawn func(convID string, req *protocol.SpawnReq)
+	trySpawn = func(convID string, req *protocol.SpawnReq) {
+		_, cancel, err := rnr.Sessions().Start(room, sender, convID)
+		if err != nil {
+			// Session already active — queue this spawn for after it ends.
+			pendingMu.Lock()
+			pendingSpawns[convID] = req
+			pendingMu.Unlock()
+			log.Printf("watcher: queued spawn for %s conv=%s (session active)", sender, convID)
+			return
+		}
+
+		go func() {
+			defer cancel()
+			defer rnr.Sessions().End(room, sender, convID)
+			defer func() {
+				// After session ends, replay any queued spawn for this conv_id.
+				pendingMu.Lock()
+				pending := pendingSpawns[convID]
+				delete(pendingSpawns, convID)
+				pendingMu.Unlock()
+				if pending != nil {
+					log.Printf("watcher: replaying queued spawn for %s conv=%s", sender, convID)
+					trySpawn(convID, pending)
+				}
+			}()
+
+			params := runner.SpawnParams{
+				Room:   room,
+				Sender: sender,
+				ConvID: convID,
+				Prompt: buildWatcherPrompt(claudeName, room, req),
+			}
+			if err := rnr.Spawn(params); err != nil {
+				log.Printf("watcher: spawn error for %s: %v", claudeName, err)
+			}
+		}()
+	}
 
 	msgs := make(chan []byte, 64)
 	readErr := make(chan error, 1)
@@ -380,38 +429,13 @@ func runWatcherConn(wsURL, room, sender, claudeName string, rnr *runner.Runner, 
 				continue
 			}
 			if event.Event == "spawn" && event.Spawn != nil {
-				go handleWatcherSpawn(room, sender, claudeName, event.Spawn, rnr)
+				convID := ""
+				if event.Spawn.Trigger != nil {
+					convID = event.Spawn.Trigger.Metadata["conv_id"]
+				}
+				trySpawn(convID, event.Spawn)
 			}
 		}
-	}
-}
-
-// handleWatcherSpawn spawns a local Claude process to respond to a directed message.
-// Each conversation thread (conv_id) gets its own session, allowing simultaneous
-// participation in multiple conversations.
-func handleWatcherSpawn(room, sender, claudeName string, req *protocol.SpawnReq, rnr *runner.Runner) {
-	convID := ""
-	if req.Trigger != nil {
-		convID = req.Trigger.Metadata["conv_id"]
-	}
-
-	_, cancel, err := rnr.Sessions().Start(room, sender, convID)
-	if err != nil {
-		log.Printf("watcher: spawn skipped (already active for %s conv=%s): %v", sender, convID, err)
-		return
-	}
-	defer cancel()
-	defer rnr.Sessions().End(room, sender, convID)
-
-	params := runner.SpawnParams{
-		Room:   room,
-		Sender: sender,
-		ConvID: convID,
-		Prompt: buildWatcherPrompt(claudeName, room, req),
-	}
-
-	if err := rnr.Spawn(params); err != nil {
-		log.Printf("watcher: spawn error for %s: %v", claudeName, err)
 	}
 }
 
