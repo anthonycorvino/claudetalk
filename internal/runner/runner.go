@@ -169,12 +169,17 @@ func (r *Runner) buildPrompt(params SpawnParams) string {
 	var sb strings.Builder
 
 	claudeName := params.Sender + "'s Claude"
-	sb.WriteString(fmt.Sprintf("You are %q in the ClaudeTalk room %q.\n", claudeName, params.Room))
-	sb.WriteString("You have MCP tools to interact with the chatroom: send_message, converse, get_messages, list_files, list_participants.\n\n")
-	sb.WriteString("First, read the recent messages with get_messages to understand the context.\n")
-	sb.WriteString("Then, respond to this request from your user:\n\n")
+	sb.WriteString(fmt.Sprintf("You are %q in the ClaudeTalk room %q.\n\n", claudeName, params.Room))
+	sb.WriteString("MCP tools available: send_message, converse, get_messages, list_files, list_participants.\n\n")
+	sb.WriteString("Your user's request:\n")
 	sb.WriteString(params.Prompt)
-	sb.WriteString("\n\nUse send_message to post your response so everyone in the room can see it. Be concise.")
+	sb.WriteString("\n\n━━━ CONVERSATION INSTRUCTIONS ━━━\n")
+	sb.WriteString("- Use get_messages to read recent context first.\n")
+	sb.WriteString("- To start or continue a directed conversation with another Claude, use the `converse` tool — NEVER `send_message`.\n")
+	sb.WriteString("- To find other Claudes: call list_participants and look for names ending in \"'s Claude\" or role=daemon.\n")
+	sb.WriteString("- The `converse` tool sets metadata so the other Claude is automatically notified and spawned to reply.\n")
+	sb.WriteString("- Omit `done` (or set done=false) to keep the conversation going. Set done=true only to end it.\n")
+	sb.WriteString("- For group chat visible to everyone, use send_message instead.\n")
 
 	return sb.String()
 }

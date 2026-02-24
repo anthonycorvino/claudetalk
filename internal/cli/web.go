@@ -11,9 +11,11 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/corvino/claudetalk/internal/protocol"
 	"github.com/corvino/claudetalk/internal/runner"
 	"github.com/corvino/claudetalk/internal/web"
 	"github.com/gorilla/websocket"
@@ -74,7 +76,7 @@ func runWeb(remoteServer string, port int, claudeBin string) error {
 
 	// Proxy WebSocket connections to remote server.
 	mux.HandleFunc("GET /ws/{room}", func(w http.ResponseWriter, req *http.Request) {
-		proxyWebSocket(w, req, remote)
+		proxyWebSocket(w, req, remote, r)
 	})
 
 	// Serve embedded web UI.
@@ -216,7 +218,12 @@ func handleLocalStop(w http.ResponseWriter, r *http.Request, rnr *runner.Runner)
 }
 
 // proxyWebSocket proxies a WebSocket connection to the remote server.
-func proxyWebSocket(w http.ResponseWriter, r *http.Request, remote *url.URL) {
+// It also starts a daemon-mode watcher for the user's Claude so that directed
+// messages trigger automatic local spawns.
+func proxyWebSocket(w http.ResponseWriter, r *http.Request, remote *url.URL, rnr *runner.Runner) {
+	room := r.PathValue("room")
+	sender := r.URL.Query().Get("sender")
+
 	// Build remote WebSocket URL.
 	wsScheme := "ws"
 	if remote.Scheme == "https" {
@@ -243,6 +250,13 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, remote *url.URL) {
 		return
 	}
 	defer localConn.Close()
+
+	// Start daemon watcher so directed messages trigger local Claude spawns.
+	// The watcher's lifetime is tied to this browser connection.
+	watcherDone := make(chan struct{})
+	if rnr != nil && room != "" && sender != "" {
+		go startWatcher(remote, room, sender, rnr, watcherDone)
+	}
 
 	// Bidirectional relay.
 	done := make(chan struct{}, 2)
@@ -276,6 +290,159 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, remote *url.URL) {
 	}()
 
 	<-done
+	close(watcherDone) // Stop the watcher when the browser disconnects.
+}
+
+// startWatcher opens a daemon-mode WebSocket connection to the remote server as
+// "{sender}'s Claude" and listens for spawn events. When a spawn event arrives,
+// it launches a local Claude process to respond. Runs until done is closed.
+func startWatcher(remote *url.URL, room, sender string, rnr *runner.Runner, done <-chan struct{}) {
+	claudeName := sender + "'s Claude"
+
+	// Build daemon WebSocket URL.
+	wsScheme := "ws"
+	if remote.Scheme == "https" {
+		wsScheme = "wss"
+	}
+	u := *remote
+	u.Scheme = wsScheme
+	u.Path = "/ws/" + url.PathEscape(room)
+	q := url.Values{}
+	q.Set("sender", claudeName)
+	q.Set("mode", "daemon")
+	q.Set("role", "daemon")
+	u.RawQuery = q.Encode()
+	wsURL := u.String()
+
+	backoff := time.Second
+	maxBackoff := 30 * time.Second
+
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+
+		if err := runWatcherConn(wsURL, room, sender, claudeName, rnr, done); err != nil {
+			log.Printf("watcher(%s): %v", claudeName, err)
+		}
+
+		select {
+		case <-done:
+			return
+		case <-time.After(backoff):
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// runWatcherConn runs a single WebSocket connection for the watcher.
+func runWatcherConn(wsURL, room, sender, claudeName string, rnr *runner.Runner, done <-chan struct{}) error {
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("dial: %w", err)
+	}
+	defer conn.Close()
+
+	log.Printf("watcher connected: %s in room %s", claudeName, room)
+
+	msgs := make(chan []byte, 64)
+	readErr := make(chan error, 1)
+
+	go func() {
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				readErr <- err
+				return
+			}
+			select {
+			case msgs <- data:
+			default:
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-done:
+			conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			return nil
+		case err := <-readErr:
+			return fmt.Errorf("read: %w", err)
+		case data := <-msgs:
+			var event protocol.ServerEvent
+			if err := json.Unmarshal(data, &event); err != nil {
+				continue
+			}
+			if event.Event == "spawn" && event.Spawn != nil {
+				go handleWatcherSpawn(room, sender, claudeName, event.Spawn, rnr)
+			}
+		}
+	}
+}
+
+// handleWatcherSpawn spawns a local Claude process to respond to a directed message.
+func handleWatcherSpawn(room, sender, claudeName string, req *protocol.SpawnReq, rnr *runner.Runner) {
+	_, cancel, err := rnr.Sessions().Start(room, sender)
+	if err != nil {
+		log.Printf("watcher: spawn skipped (already active for %s): %v", sender, err)
+		return
+	}
+	defer cancel()
+	defer rnr.Sessions().End(room, sender)
+
+	params := runner.SpawnParams{
+		Room:   room,
+		Sender: sender,
+		Prompt: buildWatcherPrompt(claudeName, room, req),
+	}
+
+	if err := rnr.Spawn(params); err != nil {
+		log.Printf("watcher: spawn error for %s: %v", claudeName, err)
+	}
+}
+
+// buildWatcherPrompt builds a prompt for a watcher-triggered Claude spawn.
+func buildWatcherPrompt(claudeName, room string, req *protocol.SpawnReq) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("You are %q in the ClaudeTalk room %q.\n\n", claudeName, room))
+
+	if len(req.Context) > 0 {
+		sb.WriteString("Recent conversation context (newest at bottom):\n")
+		for _, env := range req.Context {
+			ts := env.Timestamp.Format("15:04:05")
+			fmt.Fprintf(&sb, "[%s] %s", ts, env.Sender)
+			if to := env.Metadata["to"]; to != "" {
+				fmt.Fprintf(&sb, " → %s", to)
+			}
+			fmt.Fprintf(&sb, ": %s\n", env.Payload.Text)
+		}
+		sb.WriteString("\n")
+	}
+
+	if req.Trigger != nil {
+		replyTo := req.Trigger.Sender
+		convID := req.Trigger.Metadata["conv_id"]
+		sb.WriteString("━━━ INCOMING DIRECT MESSAGE ━━━\n")
+		fmt.Fprintf(&sb, "From:            %s\n", replyTo)
+		fmt.Fprintf(&sb, "Conversation ID: %s\n", convID)
+		fmt.Fprintf(&sb, "Message:         %s\n", req.Trigger.Payload.Text)
+		sb.WriteString("\n━━━ REPLY INSTRUCTIONS ━━━\n")
+		sb.WriteString("1. You MUST reply using the `converse` tool — NEVER `send_message` for directed replies.\n")
+		fmt.Fprintf(&sb, "2. Use exactly: converse(to=%q, conv_id=%q, message=\"your reply\")\n", replyTo, convID)
+		sb.WriteString("3. Do NOT call get_messages first — the context above is already current.\n")
+		sb.WriteString("4. To CONTINUE the conversation: omit `done` (defaults to false). The other Claude will be automatically notified and will reply.\n")
+		sb.WriteString("5. To END the conversation: set done=true only when the topic is genuinely exhausted and neither side has anything left to add.\n")
+		sb.WriteString("6. Be concise and substantive. This is a Claude-to-Claude conversation.\n")
+	}
+
+	return sb.String()
 }
 
 func writeJSONWeb(w http.ResponseWriter, status int, v any) {

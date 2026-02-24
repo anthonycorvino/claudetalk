@@ -132,15 +132,14 @@ func (s *Spawner) writeMCPConfig() (string, error) {
 func (s *Spawner) buildPrompt(req *protocol.SpawnReq) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("You are %q in the ClaudeTalk room %q.\n", s.name, s.room))
-	sb.WriteString("You have MCP tools to interact with the chatroom: send_message, converse, get_messages, send_file, get_file, list_files, list_participants.\n\n")
+	sb.WriteString(fmt.Sprintf("You are %q in the ClaudeTalk room %q.\n\n", s.name, s.room))
 
 	// Add context messages.
 	if len(req.Context) > 0 {
-		sb.WriteString("Recent conversation context:\n")
+		sb.WriteString("Recent conversation context (newest at bottom):\n")
 		for _, env := range req.Context {
 			ts := env.Timestamp.Format("15:04:05")
-			fmt.Fprintf(&sb, "[#%d %s] %s", env.SeqNum, ts, env.Sender)
+			fmt.Fprintf(&sb, "[%s] %s", ts, env.Sender)
 			if to := env.Metadata["to"]; to != "" {
 				fmt.Fprintf(&sb, " → %s", to)
 			}
@@ -149,15 +148,21 @@ func (s *Spawner) buildPrompt(req *protocol.SpawnReq) string {
 		sb.WriteString("\n")
 	}
 
-	// Add the trigger message.
+	// Add the trigger message and instructions.
 	if req.Trigger != nil {
-		sb.WriteString("You received a direct message that requires your response:\n")
-		fmt.Fprintf(&sb, "From: %s\n", req.Trigger.Sender)
-		fmt.Fprintf(&sb, "Message: %s\n", req.Trigger.Payload.Text)
-		if convID := req.Trigger.Metadata["conv_id"]; convID != "" {
-			fmt.Fprintf(&sb, "Conversation ID: %s\n", convID)
-		}
-		sb.WriteString("\nPlease respond using the converse tool with the sender's name and conversation ID.\n")
+		replyTo := req.Trigger.Sender
+		convID := req.Trigger.Metadata["conv_id"]
+		sb.WriteString("━━━ INCOMING DIRECT MESSAGE ━━━\n")
+		fmt.Fprintf(&sb, "From:            %s\n", replyTo)
+		fmt.Fprintf(&sb, "Conversation ID: %s\n", convID)
+		fmt.Fprintf(&sb, "Message:         %s\n", req.Trigger.Payload.Text)
+		sb.WriteString("\n━━━ REPLY INSTRUCTIONS ━━━\n")
+		sb.WriteString("1. You MUST reply using the `converse` tool — NEVER `send_message` for directed replies.\n")
+		fmt.Fprintf(&sb, "2. Use exactly: converse(to=%q, conv_id=%q, message=\"your reply\")\n", replyTo, convID)
+		sb.WriteString("3. Do NOT call get_messages first — the context above is already current.\n")
+		sb.WriteString("4. To CONTINUE the conversation: omit `done` (defaults to false). The other Claude will be automatically notified and will reply.\n")
+		sb.WriteString("5. To END the conversation: set done=true only when the topic is genuinely exhausted and neither side has anything left to add.\n")
+		sb.WriteString("6. Be concise and substantive. This is a Claude-to-Claude conversation.\n")
 	}
 
 	return sb.String()

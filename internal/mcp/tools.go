@@ -122,6 +122,7 @@ func RegisterTools(srv *mcpserver.MCPServer, client *HTTPClient) {
 			Properties: map[string]any{},
 		},
 	}, makeListParticipantsHandler(client))
+
 }
 
 func makeSendMessageHandler(client *HTTPClient) mcpserver.ToolHandlerFunc {

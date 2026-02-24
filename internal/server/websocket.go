@@ -131,7 +131,7 @@ func (c *Client) writePump() {
 			// for any daemon client in this room.
 			if target := c.room.ShouldSpawn(env); target != "" {
 				if dc := c.room.GetDaemonClient(target); dc != nil && dc != c {
-					context := c.room.LatestMessages(10)
+					context := c.room.LatestMessages(30)
 					spawnEvent := protocol.ServerEvent{
 						Event: "spawn",
 						Spawn: &protocol.SpawnReq{
