@@ -322,8 +322,8 @@ func (h *Handlers) SpawnClaude(w http.ResponseWriter, r *http.Request) {
 	room := h.Hub.GetOrCreateRoom(roomName)
 	claudeName := req.Sender + "'s Claude"
 
-	// Try to start a session.
-	_, cancel, err := h.Runner.Sessions().Start(roomName, req.Sender)
+	// Try to start a session (no conv_id for user-initiated spawns).
+	_, cancel, err := h.Runner.Sessions().Start(roomName, req.Sender, "")
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -340,7 +340,7 @@ func (h *Handlers) SpawnClaude(w http.ResponseWriter, r *http.Request) {
 	// Launch local Claude Code process in background.
 	go func() {
 		defer cancel()
-		defer h.Runner.Sessions().End(roomName, req.Sender)
+		defer h.Runner.Sessions().End(roomName, req.Sender, "")
 		defer room.UntrackParticipant(claudeName)
 
 		params := runner.SpawnParams{

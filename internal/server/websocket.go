@@ -127,17 +127,22 @@ func (c *Client) writePump() {
 				}
 			}
 
-			// After sending the message, check if we need to trigger a spawn
-			// for any daemon client in this room.
-			if target := c.room.ShouldSpawn(env); target != "" {
-				if dc := c.room.GetDaemonClient(target); dc != nil && dc != c {
-					context := c.room.LatestMessages(30)
+			// After sending the message, trigger spawn events for all relevant daemon clients.
+			// For group conv_id threads, this notifies every thread participant except the sender.
+			if targets, allParticipants := c.room.GetConvSpawnTargets(env); len(targets) > 0 {
+				ctx := c.room.LatestMessages(30)
+				daemonClients := c.room.GetDaemonClients(targets)
+				for _, dc := range daemonClients {
+					if dc == c {
+						continue
+					}
 					spawnEvent := protocol.ServerEvent{
 						Event: "spawn",
 						Spawn: &protocol.SpawnReq{
-							Reason:  "directed_message",
-							Trigger: &env,
-							Context: context,
+							Reason:       "directed_message",
+							Trigger:      &env,
+							Context:      ctx,
+							Participants: allParticipants,
 						},
 					}
 					dc.sendRaw(spawnEvent)

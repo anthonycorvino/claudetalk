@@ -78,6 +78,7 @@ func (r *Runner) Sessions() *SessionManager {
 type SpawnParams struct {
 	Room   string
 	Sender string
+	ConvID string // conversation thread ID; used for concurrent session tracking
 	Prompt string
 }
 

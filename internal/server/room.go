@@ -30,21 +30,23 @@ type Room struct {
 	name       string
 	maxHistory int
 
-	mu           sync.RWMutex
-	messages     []protocol.Envelope
-	seq          int64
-	clients      map[*Client]struct{}
-	participants map[string]*participantState
+	mu              sync.RWMutex
+	messages        []protocol.Envelope
+	seq             int64
+	clients         map[*Client]struct{}
+	participants    map[string]*participantState
+	convParticipants map[string]map[string]struct{} // conv_id → participant names
 }
 
 // NewRoom creates a room with the given name and history limit.
 func NewRoom(name string, maxHistory int) *Room {
 	return &Room{
-		name:         name,
-		maxHistory:   maxHistory,
-		messages:     make([]protocol.Envelope, 0, 64),
-		clients:      make(map[*Client]struct{}),
-		participants: make(map[string]*participantState),
+		name:             name,
+		maxHistory:       maxHistory,
+		messages:         make([]protocol.Envelope, 0, 64),
+		clients:          make(map[*Client]struct{}),
+		participants:     make(map[string]*participantState),
+		convParticipants: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -67,6 +69,16 @@ func (r *Room) AddMessage(sender, msgType string, payload protocol.Payload, meta
 	if len(r.messages) > r.maxHistory {
 		excess := len(r.messages) - r.maxHistory
 		r.messages = r.messages[excess:]
+	}
+	// Track conv_id participants for group thread broadcasting.
+	if convID := env.Metadata["conv_id"]; convID != "" {
+		if _, ok := r.convParticipants[convID]; !ok {
+			r.convParticipants[convID] = make(map[string]struct{})
+		}
+		r.convParticipants[convID][env.Sender] = struct{}{}
+		if to := env.Metadata["to"]; to != "" {
+			r.convParticipants[convID][to] = struct{}{}
+		}
 	}
 	// Copy client set for broadcast outside lock.
 	clients := make([]*Client, 0, len(r.clients))
@@ -203,33 +215,58 @@ func (r *Room) ListParticipants() []protocol.ParticipantInfo {
 	return out
 }
 
-// ShouldSpawn checks if a message should trigger a daemon spawn.
-// Returns the target participant name, or "" if no spawn is needed.
-func (r *Room) ShouldSpawn(env protocol.Envelope) string {
-	// Only spawn for messages directed at a specific recipient.
-	to := env.Metadata["to"]
-	if to == "" {
-		return ""
+// GetConvSpawnTargets returns the set of daemon participants who should receive
+// spawn events when this message arrives, plus all conv thread members for prompt context.
+// For group threads (shared conv_id), ALL thread members except the sender are notified.
+func (r *Room) GetConvSpawnTargets(env protocol.Envelope) (targets []string, allParticipants []string) {
+	if env.Metadata["to"] == "" || env.Metadata["expecting_reply"] != "true" {
+		return nil, nil
 	}
-	// Only spawn if the recipient expects a reply.
-	if env.Metadata["expecting_reply"] != "true" {
-		return ""
-	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	ps, ok := r.participants[to]
-	if !ok || !ps.Connected || ps.Role != "daemon" {
-		return ""
+
+	convID := env.Metadata["conv_id"]
+	targetSet := make(map[string]struct{})
+
+	// Always include the primary `to` recipient if they're a connected daemon.
+	if ps, ok := r.participants[env.Metadata["to"]]; ok && ps.Connected && ps.Role == "daemon" {
+		targetSet[env.Metadata["to"]] = struct{}{}
 	}
-	return to
+
+	// For conv_id threads, also notify every other thread participant.
+	if convID != "" {
+		for name := range r.convParticipants[convID] {
+			if name == env.Sender {
+				continue
+			}
+			ps, ok := r.participants[name]
+			if !ok || !ps.Connected || ps.Role != "daemon" {
+				continue
+			}
+			targetSet[name] = struct{}{}
+		}
+		// Build full participant list for the prompt.
+		for name := range r.convParticipants[convID] {
+			allParticipants = append(allParticipants, name)
+		}
+	}
+
+	for name := range targetSet {
+		targets = append(targets, name)
+	}
+	return targets, allParticipants
 }
 
-// GetDaemonClient returns the daemon client for a participant, if any.
-func (r *Room) GetDaemonClient(name string) *Client {
+// GetDaemonClients returns the daemon *Client for each of the given participant names.
+func (r *Room) GetDaemonClients(names []string) map[string]*Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if ps, ok := r.participants[name]; ok && ps.Client != nil {
-		return ps.Client
+	result := make(map[string]*Client, len(names))
+	for _, name := range names {
+		if ps, ok := r.participants[name]; ok && ps.Client != nil {
+			result[name] = ps.Client
+		}
 	}
-	return nil
+	return result
 }

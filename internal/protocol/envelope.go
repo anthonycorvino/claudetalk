@@ -80,9 +80,10 @@ type ServerEvent struct {
 
 // SpawnReq tells a daemon to spawn a Claude Code instance.
 type SpawnReq struct {
-	Reason  string     `json:"reason"`
-	Trigger *Envelope  `json:"trigger"`
-	Context []Envelope `json:"context"`
+	Reason       string     `json:"reason"`
+	Trigger      *Envelope  `json:"trigger"`
+	Context      []Envelope `json:"context"`
+	Participants []string   `json:"participants,omitempty"` // all members of this conv thread (group convos)
 }
 
 // ParticipantInfo describes a connected participant.

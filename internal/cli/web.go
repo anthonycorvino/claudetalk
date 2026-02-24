@@ -172,7 +172,7 @@ func handleLocalSpawn(w http.ResponseWriter, r *http.Request, rnr *runner.Runner
 		return
 	}
 
-	_, cancel, err := rnr.Sessions().Start(roomName, req.Sender)
+	_, cancel, err := rnr.Sessions().Start(roomName, req.Sender, "")
 	if err != nil {
 		writeJSONWeb(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
@@ -182,7 +182,7 @@ func handleLocalSpawn(w http.ResponseWriter, r *http.Request, rnr *runner.Runner
 
 	go func() {
 		defer cancel()
-		defer rnr.Sessions().End(roomName, req.Sender)
+		defer rnr.Sessions().End(roomName, req.Sender, "")
 
 		params := runner.SpawnParams{
 			Room:   roomName,
@@ -387,18 +387,26 @@ func runWatcherConn(wsURL, room, sender, claudeName string, rnr *runner.Runner, 
 }
 
 // handleWatcherSpawn spawns a local Claude process to respond to a directed message.
+// Each conversation thread (conv_id) gets its own session, allowing simultaneous
+// participation in multiple conversations.
 func handleWatcherSpawn(room, sender, claudeName string, req *protocol.SpawnReq, rnr *runner.Runner) {
-	_, cancel, err := rnr.Sessions().Start(room, sender)
+	convID := ""
+	if req.Trigger != nil {
+		convID = req.Trigger.Metadata["conv_id"]
+	}
+
+	_, cancel, err := rnr.Sessions().Start(room, sender, convID)
 	if err != nil {
-		log.Printf("watcher: spawn skipped (already active for %s): %v", sender, err)
+		log.Printf("watcher: spawn skipped (already active for %s conv=%s): %v", sender, convID, err)
 		return
 	}
 	defer cancel()
-	defer rnr.Sessions().End(room, sender)
+	defer rnr.Sessions().End(room, sender, convID)
 
 	params := runner.SpawnParams{
 		Room:   room,
 		Sender: sender,
+		ConvID: convID,
 		Prompt: buildWatcherPrompt(claudeName, room, req),
 	}
 
@@ -412,6 +420,16 @@ func buildWatcherPrompt(claudeName, room string, req *protocol.SpawnReq) string 
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("You are %q in the ClaudeTalk room %q.\n\n", claudeName, room))
+
+	// Group thread context.
+	isGroup := len(req.Participants) > 1
+	if isGroup {
+		sb.WriteString("This is a GROUP conversation thread. All participants:\n")
+		for _, p := range req.Participants {
+			sb.WriteString("  • " + p + "\n")
+		}
+		sb.WriteString("When you reply, ALL participants in this thread are automatically notified and may respond.\n\n")
+	}
 
 	if len(req.Context) > 0 {
 		sb.WriteString("Recent conversation context (newest at bottom):\n")
@@ -429,17 +447,21 @@ func buildWatcherPrompt(claudeName, room string, req *protocol.SpawnReq) string 
 	if req.Trigger != nil {
 		replyTo := req.Trigger.Sender
 		convID := req.Trigger.Metadata["conv_id"]
-		sb.WriteString("━━━ INCOMING DIRECT MESSAGE ━━━\n")
+		sb.WriteString("━━━ INCOMING MESSAGE ━━━\n")
 		fmt.Fprintf(&sb, "From:            %s\n", replyTo)
 		fmt.Fprintf(&sb, "Conversation ID: %s\n", convID)
 		fmt.Fprintf(&sb, "Message:         %s\n", req.Trigger.Payload.Text)
 		sb.WriteString("\n━━━ REPLY INSTRUCTIONS ━━━\n")
 		sb.WriteString("1. You MUST reply using the `converse` tool — NEVER `send_message` for directed replies.\n")
-		fmt.Fprintf(&sb, "2. Use exactly: converse(to=%q, conv_id=%q, message=\"your reply\")\n", replyTo, convID)
-		sb.WriteString("3. Do NOT call get_messages first — the context above is already current.\n")
-		sb.WriteString("4. To CONTINUE the conversation: omit `done` (defaults to false). The other Claude will be automatically notified and will reply.\n")
-		sb.WriteString("5. To END the conversation: set done=true only when the topic is genuinely exhausted and neither side has anything left to add.\n")
-		sb.WriteString("6. Be concise and substantive. This is a Claude-to-Claude conversation.\n")
+		fmt.Fprintf(&sb, "2. Use: converse(to=%q, conv_id=%q, message=\"your reply\")\n", replyTo, convID)
+		if isGroup {
+			sb.WriteString("   In a group thread you may also change `to` to address a specific participant.\n")
+			sb.WriteString("   All other thread participants will be notified regardless.\n")
+		}
+		sb.WriteString("3. The context above is current — no need to call get_messages first.\n")
+		sb.WriteString("4. To CONTINUE: omit `done`. All participants are notified automatically.\n")
+		sb.WriteString("5. To END: set done=true only when the topic is genuinely exhausted.\n")
+		sb.WriteString("6. Be concise and substantive.\n")
 	}
 
 	return sb.String()
