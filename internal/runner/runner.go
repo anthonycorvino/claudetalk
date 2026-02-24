@@ -101,6 +101,7 @@ func (r *Runner) Spawn(params SpawnParams) error {
 	args := []string{
 		"--mcp-config", configPath,
 		"--print",
+		"--dangerously-skip-permissions",
 		"-p", prompt,
 	}
 
