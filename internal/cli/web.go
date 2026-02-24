@@ -90,20 +90,22 @@ func runWeb(remoteServer string, port int, claudeBin string) error {
 		log.Printf("proxy error: %v", err)
 		http.Error(w, fmt.Sprintf("proxy error: %v", err), http.StatusBadGateway)
 	}
+	proxyHandler := func(w http.ResponseWriter, req *http.Request) {
+		req.Host = remote.Host
+		proxy.ServeHTTP(w, req)
+	}
+	mux.HandleFunc("GET /api/", proxyHandler)
+	mux.HandleFunc("POST /api/", proxyHandler)
+
+	// Serve index.html at root, 404 everything else.
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path == "/" {
-			data, _ := web.StaticFS.ReadFile("static/index.html")
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write(data)
+		if req.URL.Path != "/" {
+			http.NotFound(w, req)
 			return
 		}
-		// Proxy API and other GET requests to remote.
-		req.Host = remote.Host
-		proxy.ServeHTTP(w, req)
-	})
-	mux.HandleFunc("/api/", func(w http.ResponseWriter, req *http.Request) {
-		req.Host = remote.Host
-		proxy.ServeHTTP(w, req)
+		data, _ := web.StaticFS.ReadFile("static/index.html")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(data)
 	})
 
 	handler := corsMiddlewareWeb(mux)
