@@ -77,31 +77,33 @@ func runWeb(remoteServer string, port int, claudeBin string) error {
 		proxyWebSocket(w, req, remote)
 	})
 
-	// Proxy all other API calls to remote server.
-	proxy := httputil.NewSingleHostReverseProxy(remote)
-	proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
-		log.Printf("proxy error: %v", err)
-		http.Error(w, fmt.Sprintf("proxy error: %v", err), http.StatusBadGateway)
-	}
-	mux.HandleFunc("/api/", func(w http.ResponseWriter, req *http.Request) {
-		req.Host = remote.Host
-		proxy.ServeHTTP(w, req)
-	})
-
 	// Serve embedded web UI.
 	staticFS, err := fs.Sub(web.StaticFS, "static")
 	if err != nil {
 		return fmt.Errorf("embedded static fs: %w", err)
 	}
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+
+	// Proxy all other requests — API calls go to remote, root serves index.html.
+	proxy := httputil.NewSingleHostReverseProxy(remote)
+	proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
+		log.Printf("proxy error: %v", err)
+		http.Error(w, fmt.Sprintf("proxy error: %v", err), http.StatusBadGateway)
+	}
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/" {
-			http.NotFound(w, req)
+		if req.URL.Path == "/" {
+			data, _ := web.StaticFS.ReadFile("static/index.html")
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(data)
 			return
 		}
-		data, _ := web.StaticFS.ReadFile("static/index.html")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(data)
+		// Proxy API and other GET requests to remote.
+		req.Host = remote.Host
+		proxy.ServeHTTP(w, req)
+	})
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, req *http.Request) {
+		req.Host = remote.Host
+		proxy.ServeHTTP(w, req)
 	})
 
 	handler := corsMiddlewareWeb(mux)
