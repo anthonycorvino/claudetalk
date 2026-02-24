@@ -1,0 +1,4 @@
+*.exe
+claudetalk-files/
+.claudetalk
+.claudetalk-seq
