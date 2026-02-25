@@ -135,10 +135,13 @@ func (c *Client) writePump() {
 			if targets, allParticipants := c.room.GetConvSpawnTargets(env); len(targets) > 0 {
 				ctx := c.room.LatestMessages(30)
 				daemonClients := c.room.GetDaemonClients(targets)
-				for _, dc := range daemonClients {
+				log.Printf("spawn dispatch: targets=%v daemonClients=%d sender=%s", targets, len(daemonClients), env.Sender)
+				for name, dc := range daemonClients {
 					if dc == c {
+						log.Printf("spawn dispatch: skipping %s (self)", name)
 						continue
 					}
+					log.Printf("spawn dispatch: sending spawn event to %s", name)
 					spawnEvent := protocol.ServerEvent{
 						Event: "spawn",
 						Spawn: &protocol.SpawnReq{
@@ -149,6 +152,21 @@ func (c *Client) writePump() {
 						},
 					}
 					dc.sendRaw(spawnEvent)
+				}
+			}
+
+			// Fire server-side hooks for non-daemon participants (e.g. host-mode spawned Claudes).
+			if hookTargets, hookParticipants := c.room.GetHookSpawnTargets(env); len(hookTargets) > 0 {
+				hookCtx := c.room.LatestMessages(30)
+				for name, hook := range hookTargets {
+					name, hook := name, hook // capture loop vars
+					log.Printf("spawn dispatch: hook for %s", name)
+					go hook(&protocol.SpawnReq{
+						Reason:       "directed_message",
+						Trigger:      &env,
+						Context:      hookCtx,
+						Participants: hookParticipants,
+					})
 				}
 			}
 		case data, ok := <-c.rawSend:

@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/corvino/claudetalk/internal/protocol"
@@ -15,10 +17,113 @@ import (
 
 // Handlers holds references needed by HTTP handlers.
 type Handlers struct {
-	Hub       *Hub
-	FileStore *FileStore
-	Runner    *runner.Runner
-	StartTime time.Time
+	Hub        *Hub
+	FileStore  *FileStore
+	Runner     *runner.Runner
+	StartTime  time.Time
+	hookStates sync.Map // key: claudeName (string), value: *hostHookState
+}
+
+// hostHookState maintains pending spawn queues for a host-mode Claude so that
+// directed replies from other Claudes trigger re-spawns automatically.
+type hostHookState struct {
+	mu            sync.Mutex
+	pendingSpawns map[string]*protocol.SpawnReq
+	rnr           *runner.Runner
+	room          string
+	sender        string
+	claudeName    string
+}
+
+func (s *hostHookState) trySpawn(req *protocol.SpawnReq) {
+	convID := ""
+	if req.Trigger != nil {
+		convID = req.Trigger.Metadata["conv_id"]
+	}
+
+	_, cancel, err := s.rnr.Sessions().Start(s.room, s.sender, convID)
+	if err != nil {
+		// Session already active — queue the latest request.
+		s.mu.Lock()
+		s.pendingSpawns[convID] = req
+		s.mu.Unlock()
+		log.Printf("host hook: queued spawn for %s conv=%s (session active)", s.sender, convID)
+		return
+	}
+
+	go func() {
+		defer cancel()
+		defer s.rnr.Sessions().End(s.room, s.sender, convID)
+		defer func() {
+			s.mu.Lock()
+			pending := s.pendingSpawns[convID]
+			delete(s.pendingSpawns, convID)
+			s.mu.Unlock()
+			if pending != nil {
+				log.Printf("host hook: replaying queued spawn for %s conv=%s", s.sender, convID)
+				s.trySpawn(pending)
+			}
+		}()
+
+		params := runner.SpawnParams{
+			Room:   s.room,
+			Sender: s.sender,
+			ConvID: convID,
+			Prompt: buildHostHookPrompt(s.claudeName, s.room, req),
+		}
+		if err := s.rnr.Spawn(params); err != nil {
+			log.Printf("host hook: spawn error for %s: %v", s.claudeName, err)
+		}
+	}()
+}
+
+// buildHostHookPrompt builds a reply prompt for a host-mode Claude responding to a directed message.
+func buildHostHookPrompt(claudeName, room string, req *protocol.SpawnReq) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("You are %q in the ClaudeTalk room %q.\n\n", claudeName, room))
+
+	isGroup := len(req.Participants) > 1
+	if isGroup {
+		sb.WriteString("This is a GROUP conversation thread. All participants:\n")
+		for _, p := range req.Participants {
+			sb.WriteString("  • " + p + "\n")
+		}
+		sb.WriteString("When you reply, ALL participants in this thread are automatically notified.\n\n")
+	}
+
+	if len(req.Context) > 0 {
+		sb.WriteString("Recent conversation context (newest at bottom):\n")
+		for _, env := range req.Context {
+			ts := env.Timestamp.Format("15:04:05")
+			fmt.Fprintf(&sb, "[%s] %s", ts, env.Sender)
+			if to := env.Metadata["to"]; to != "" {
+				fmt.Fprintf(&sb, " → %s", to)
+			}
+			fmt.Fprintf(&sb, ": %s\n", env.Payload.Text)
+		}
+		sb.WriteString("\n")
+	}
+
+	if req.Trigger != nil {
+		replyTo := req.Trigger.Sender
+		convID := req.Trigger.Metadata["conv_id"]
+		sb.WriteString("━━━ INCOMING MESSAGE ━━━\n")
+		fmt.Fprintf(&sb, "From:            %s\n", replyTo)
+		fmt.Fprintf(&sb, "Conversation ID: %s\n", convID)
+		fmt.Fprintf(&sb, "Message:         %s\n", req.Trigger.Payload.Text)
+		sb.WriteString("\n━━━ REPLY INSTRUCTIONS ━━━\n")
+		sb.WriteString("1. You MUST reply using the `converse` tool — NEVER `send_message` for directed replies.\n")
+		fmt.Fprintf(&sb, "2. Use: converse(to=%q, conv_id=%q, message=\"your reply\")\n", replyTo, convID)
+		if isGroup {
+			sb.WriteString("   In a group thread you may also change `to` to address a specific participant.\n")
+		}
+		sb.WriteString("3. The context above is current — no need to call get_messages first.\n")
+		sb.WriteString("4. To CONTINUE: omit `done`. All participants are notified automatically.\n")
+		sb.WriteString("5. To END: set done=true only when the topic is genuinely exhausted.\n")
+		sb.WriteString("6. Be concise and substantive.\n")
+	}
+
+	return sb.String()
 }
 
 // Health handles GET /api/health.
@@ -322,6 +427,17 @@ func (h *Handlers) SpawnClaude(w http.ResponseWriter, r *http.Request) {
 	room := h.Hub.GetOrCreateRoom(roomName)
 	claudeName := req.Sender + "'s Claude"
 
+	// Ensure a spawn hook is registered so directed replies from other Claudes
+	// trigger automatic re-spawns (mirrors watcher daemon behavior in web mode).
+	hookVal, _ := h.hookStates.LoadOrStore(claudeName, &hostHookState{
+		rnr:           h.Runner,
+		room:          roomName,
+		sender:        req.Sender,
+		claudeName:    claudeName,
+		pendingSpawns: make(map[string]*protocol.SpawnReq),
+	})
+	room.RegisterSpawnHook(claudeName, hookVal.(*hostHookState).trySpawn)
+
 	// Try to start a session (no conv_id for user-initiated spawns).
 	_, cancel, err := h.Runner.Sessions().Start(roomName, req.Sender, "")
 	if err != nil {
@@ -390,12 +506,15 @@ func (h *Handlers) StopClaude(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	claudeName := req.Sender + "'s Claude"
 	room := h.Hub.GetRoom(roomName)
 	if room != nil {
+		room.UnregisterSpawnHook(claudeName)
 		room.AddMessage("system", protocol.TypeSystem, protocol.Payload{
-			Text: req.Sender + "'s Claude was stopped",
+			Text: claudeName + " was stopped",
 		}, nil)
 	}
+	h.hookStates.Delete(claudeName)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }

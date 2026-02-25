@@ -30,12 +30,13 @@ type Room struct {
 	name       string
 	maxHistory int
 
-	mu              sync.RWMutex
-	messages        []protocol.Envelope
-	seq             int64
-	clients         map[*Client]struct{}
-	participants    map[string]*participantState
-	convParticipants map[string]map[string]struct{} // conv_id → participant names
+	mu               sync.RWMutex
+	messages         []protocol.Envelope
+	seq              int64
+	clients          map[*Client]struct{}
+	participants     map[string]*participantState
+	convParticipants map[string]map[string]struct{}            // conv_id → participant names
+	spawnHooks       map[string]func(*protocol.SpawnReq) // name → hook for non-daemon participants
 }
 
 // NewRoom creates a room with the given name and history limit.
@@ -47,6 +48,7 @@ func NewRoom(name string, maxHistory int) *Room {
 		clients:          make(map[*Client]struct{}),
 		participants:     make(map[string]*participantState),
 		convParticipants: make(map[string]map[string]struct{}),
+		spawnHooks:       make(map[string]func(*protocol.SpawnReq)),
 	}
 }
 
@@ -213,6 +215,63 @@ func (r *Room) ListParticipants() []protocol.ParticipantInfo {
 		})
 	}
 	return out
+}
+
+// RegisterSpawnHook registers a function to call when a directed spawn event should
+// be delivered to a participant who has no daemon WebSocket connection (e.g., host-mode).
+func (r *Room) RegisterSpawnHook(name string, hook func(*protocol.SpawnReq)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.spawnHooks[name] = hook
+}
+
+// UnregisterSpawnHook removes the spawn hook for a participant.
+func (r *Room) UnregisterSpawnHook(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.spawnHooks, name)
+}
+
+// GetHookSpawnTargets returns hooks for participants who should receive spawn events
+// but don't have a daemon WS client. Complements GetConvSpawnTargets for non-daemon participants.
+func (r *Room) GetHookSpawnTargets(env protocol.Envelope) (hooks map[string]func(*protocol.SpawnReq), allParticipants []string) {
+	if env.Metadata["to"] == "" || env.Metadata["expecting_reply"] != "true" {
+		return nil, nil
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	hooks = make(map[string]func(*protocol.SpawnReq))
+	convID := env.Metadata["conv_id"]
+
+	tryAdd := func(name string) {
+		if name == env.Sender {
+			return
+		}
+		hook, hasHook := r.spawnHooks[name]
+		if !hasHook {
+			return
+		}
+		// Skip if they already have a daemon client (GetConvSpawnTargets covers them).
+		if ps, ok := r.participants[name]; ok && ps.Client != nil {
+			return
+		}
+		hooks[name] = hook
+	}
+
+	tryAdd(env.Metadata["to"])
+
+	if convID != "" {
+		for name := range r.convParticipants[convID] {
+			tryAdd(name)
+		}
+		for name := range r.convParticipants[convID] {
+			allParticipants = append(allParticipants, name)
+		}
+	}
+
+	return hooks, allParticipants
 }
 
 // GetConvSpawnTargets returns the set of daemon participants who should receive
