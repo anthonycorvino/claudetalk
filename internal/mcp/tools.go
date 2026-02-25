@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/google/uuid"
@@ -91,7 +92,22 @@ func RegisterTools(srv *mcpserver.MCPServer, client *HTTPClient) {
 		},
 	}, makeSendFileHandler(client))
 
-	// 5. get_file
+	// 5. send_directory
+	srv.AddTool(mcplib.Tool{
+		Name:        "send_directory",
+		Description: "Upload all files in a directory to share with participants. Use this instead of calling send_file repeatedly.",
+		InputSchema: mcplib.ToolInputSchema{
+			Type: "object",
+			Properties: map[string]any{
+				"path":        prop("string", "Local directory path to upload files from"),
+				"recursive":   prop("boolean", "If true, include files in subdirectories (default: false)"),
+				"description": prop("string", "Optional description prefix for each uploaded file"),
+			},
+			Required: []string{"path"},
+		},
+	}, makeSendDirectoryHandler(client))
+
+	// 6. get_file
 	srv.AddTool(mcplib.Tool{
 		Name:        "get_file",
 		Description: "Download a shared file from the room.",
@@ -105,7 +121,7 @@ func RegisterTools(srv *mcpserver.MCPServer, client *HTTPClient) {
 		},
 	}, makeGetFileHandler(client))
 
-	// 6. list_files
+	// 7. list_files
 	srv.AddTool(mcplib.Tool{
 		Name:        "list_files",
 		Description: "List all shared files in the room.",
@@ -115,7 +131,7 @@ func RegisterTools(srv *mcpserver.MCPServer, client *HTTPClient) {
 		},
 	}, makeListFilesHandler(client))
 
-	// 7. list_participants
+	// 8. list_participants
 	srv.AddTool(mcplib.Tool{
 		Name:        "list_participants",
 		Description: "List all participants connected to the room.",
@@ -285,6 +301,62 @@ func makeGetFileHandler(client *HTTPClient) mcpserver.ToolHandlerFunc {
 		}
 
 		return mcplib.NewToolResultText(fmt.Sprintf("File saved to: %s", savePath)), nil
+	}
+}
+
+func makeSendDirectoryHandler(client *HTTPClient) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		dir := request.GetString("path", "")
+		recursive := request.GetBool("recursive", false)
+		description := request.GetString("description", "")
+		if dir == "" {
+			return mcplib.NewToolResultError("path is required"), nil
+		}
+
+		var files []string
+		var walkFn func(string) error
+		walkFn = func(p string) error {
+			entries, err := os.ReadDir(p)
+			if err != nil {
+				return err
+			}
+			for _, e := range entries {
+				full := p + "/" + e.Name()
+				if e.IsDir() {
+					if recursive {
+						walkFn(full)
+					}
+				} else {
+					files = append(files, full)
+				}
+			}
+			return nil
+		}
+		if err := walkFn(dir); err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("failed to read directory: %v", err)), nil
+		}
+		if len(files) == 0 {
+			return mcplib.NewToolResultText("No files found in directory."), nil
+		}
+
+		var sb strings.Builder
+		uploaded, failed := 0, 0
+		for _, f := range files {
+			desc := description
+			if desc == "" {
+				desc = f
+			}
+			info, err := client.UploadFile(f, desc)
+			if err != nil {
+				fmt.Fprintf(&sb, "FAILED %s: %v\n", f, err)
+				failed++
+			} else {
+				fmt.Fprintf(&sb, "OK %s (id: %s, %d bytes)\n", info.Filename, info.ID, info.Size)
+				uploaded++
+			}
+		}
+		fmt.Fprintf(&sb, "\nUploaded %d/%d files.", uploaded, len(files))
+		return mcplib.NewToolResultText(sb.String()), nil
 	}
 }
 
