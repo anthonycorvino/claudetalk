@@ -87,6 +87,10 @@ func (c *Client) readPump() {
 			}
 			return
 		}
+		// Drop empty/ping-only frames.
+		if req.Payload.Text == "" && req.Payload.Code == "" && req.Payload.Diff == "" && req.Type != protocol.TypeFile {
+			continue
+		}
 		sender := req.Sender
 		if sender == "" {
 			sender = c.sender

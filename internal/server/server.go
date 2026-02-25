@@ -50,7 +50,7 @@ func New(hub *Hub, addr string, fileStore *FileStore, r *runner.Runner) *http.Se
 	if err != nil {
 		log.Fatalf("embedded static fs: %v", err)
 	}
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", noCacheHandler(http.FileServer(http.FS(staticFS)))))
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -75,6 +75,13 @@ func New(hub *Hub, addr string, fileStore *FileStore, r *runner.Runner) *http.Se
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+}
+
+func noCacheHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
