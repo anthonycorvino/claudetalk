@@ -103,11 +103,11 @@ func (r *Runner) Spawn(params SpawnParams) error {
 		"--mcp-config", configPath,
 		"--print",
 		"--dangerously-skip-permissions",
-		"-p", prompt,
 	}
 
 	cmd := exec.Command(r.claudeBin, args...)
 	cmd.Dir = r.workDir
+	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
