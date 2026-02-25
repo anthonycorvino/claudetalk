@@ -1,9 +1,13 @@
 package runner
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,10 +109,12 @@ func (r *Runner) Spawn(params SpawnParams) error {
 		"--dangerously-skip-permissions",
 	}
 
+	var stdoutBuf bytes.Buffer
+
 	cmd := exec.Command(r.claudeBin, args...)
 	cmd.Dir = r.workDir
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Stdout = os.Stderr
+	cmd.Stdout = io.MultiWriter(&stdoutBuf, os.Stderr) // capture + log
 	cmd.Stderr = os.Stderr
 
 	// Remove CLAUDECODE env var so nested claude can run.
@@ -116,6 +122,15 @@ func (r *Runner) Spawn(params SpawnParams) error {
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("claude exited with error: %w", err)
+	}
+
+	// If Claude printed a response instead of using send_message, post it to the
+	// chat as a private whisper to the owner so it appears in the web UI.
+	if output := strings.TrimSpace(stdoutBuf.String()); output != "" {
+		claudeName := params.Sender + "'s Claude"
+		if err := r.postMessage(params.Room, claudeName, output, params.Sender); err != nil {
+			log.Printf("runner: failed to post stdout as message: %v", err)
+		}
 	}
 
 	log.Printf("claude completed for %s in room %s", params.Sender, params.Room)
@@ -186,6 +201,32 @@ func (r *Runner) buildPrompt(params SpawnParams) string {
 	sb.WriteString("- Omit `done` (or set done=false) to keep the conversation going. Set done=true only to end it.\n")
 
 	return sb.String()
+}
+
+// postMessage posts a message to the room via the REST API.
+// If to is non-empty the message is sent as a private whisper.
+func (r *Runner) postMessage(room, sender, text, to string) error {
+	metadata := map[string]string{}
+	if to != "" {
+		metadata["to"] = to
+		metadata["private"] = "true"
+	}
+	body, err := json.Marshal(map[string]any{
+		"sender":   sender,
+		"type":     "text",
+		"payload":  map[string]string{"text": text},
+		"metadata": metadata,
+	})
+	if err != nil {
+		return err
+	}
+	roomEsc := url.PathEscape(room)
+	resp, err := http.Post(r.serverURL+"/api/rooms/"+roomEsc+"/messages", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
 }
 
 // filterEnv returns env vars with the named key removed.
