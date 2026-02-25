@@ -90,7 +90,14 @@ func (r *Room) AddMessage(sender, msgType string, payload protocol.Payload, meta
 	r.mu.Unlock()
 
 	// Broadcast to WebSocket clients.
+	// Private messages (metadata.private=true) are only delivered to the sender
+	// and the intended recipient; daemon clients always receive everything.
 	for _, c := range clients {
+		if env.Metadata["private"] == "true" && c.mode != "daemon" {
+			if c.sender != env.Sender && c.sender != env.Metadata["to"] {
+				continue
+			}
+		}
 		c.Send(env)
 	}
 	return env

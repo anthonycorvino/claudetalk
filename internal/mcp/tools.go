@@ -35,12 +35,13 @@ func RegisterTools(srv *mcpserver.MCPServer, client *HTTPClient) {
 	// 1. send_message
 	srv.AddTool(mcplib.Tool{
 		Name:        "send_message",
-		Description: "Send a message to the chatroom. All participants will see it.",
+		Description: "Send a message to the chatroom. Omit `to` for a public message visible to everyone. Set `to` to send a private whisper visible only to that user and yourself.",
 		InputSchema: mcplib.ToolInputSchema{
 			Type: "object",
 			Properties: map[string]any{
 				"text": prop("string", "The message text to send"),
 				"type": propEnum("string", "Message type: text (default), code, or diff", []string{"text", "code", "diff"}),
+				"to":   prop("string", "Optional: recipient name for a private message visible only to them"),
 			},
 			Required: []string{"text"},
 		},
@@ -129,15 +130,27 @@ func makeSendMessageHandler(client *HTTPClient) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		text := request.GetString("text", "")
 		msgType := request.GetString("type", "text")
+		to := request.GetString("to", "")
 		if text == "" {
 			return mcplib.NewToolResultError("text is required"), nil
 		}
 
-		env, err := client.SendMessage(text, msgType, nil)
+		var metadata map[string]string
+		if to != "" {
+			metadata = map[string]string{
+				"to":      to,
+				"private": "true",
+			}
+		}
+
+		env, err := client.SendMessage(text, msgType, metadata)
 		if err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("failed to send: %v", err)), nil
 		}
 
+		if to != "" {
+			return mcplib.NewToolResultText(fmt.Sprintf("Private message sent to %s (seq #%d)", to, env.SeqNum)), nil
+		}
 		return mcplib.NewToolResultText(fmt.Sprintf("Message sent (seq #%d)", env.SeqNum)), nil
 	}
 }

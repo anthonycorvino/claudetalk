@@ -100,6 +100,8 @@
     }
 
     // --- WebSocket ---
+    let wsHeartbeat = null;
+
     function connectWS() {
         const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const url = proto + '//' + window.location.host + '/ws/' + encodeURIComponent(room) + '?sender=' + encodeURIComponent(sender);
@@ -107,11 +109,21 @@
 
         ws.onopen = function () {
             console.log('WebSocket connected');
+            // Catch up on any messages missed while disconnected.
+            catchUpMessages();
+            // Heartbeat: send a ping every 30s to keep the connection alive through proxies.
+            if (wsHeartbeat) clearInterval(wsHeartbeat);
+            wsHeartbeat = setInterval(function () {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ _ping: true }));
+                }
+            }, 30000);
         };
 
         ws.onmessage = function (evt) {
             try {
                 const env = JSON.parse(evt.data);
+                if (env._ping) return; // ignore server-side pings
                 onMessage(env);
             } catch (e) {
                 console.error('Parse error:', e);
@@ -120,6 +132,7 @@
 
         ws.onclose = function () {
             console.log('WebSocket closed, reconnecting in 3s...');
+            if (wsHeartbeat) { clearInterval(wsHeartbeat); wsHeartbeat = null; }
             setTimeout(connectWS, 3000);
         };
 
@@ -128,10 +141,28 @@
         };
     }
 
+    async function catchUpMessages() {
+        if (seenSeqs.size === 0) return;
+        const lastSeq = Math.max(...seenSeqs);
+        try {
+            const resp = await apiFetch('/api/rooms/' + encodeURIComponent(room) + '/messages?after=' + lastSeq + '&limit=100');
+            if (resp.ok) {
+                const data = await resp.json();
+                for (const env of data.messages || []) {
+                    renderMessage(env);
+                }
+            }
+        } catch (e) { /* ignore */ }
+    }
+
     function onMessage(env) {
         // Deduplicate by seq
         if (env.seq && seenSeqs.has(env.seq)) return;
         if (env.seq) seenSeqs.add(env.seq);
+        // Client-side guard: drop private messages not meant for this user.
+        if (env.metadata && env.metadata.private === 'true') {
+            if (env.sender !== sender && env.metadata.to !== sender) return;
+        }
         renderMessage(env);
         refreshParticipants();
     }
@@ -166,7 +197,10 @@
             html += '<span class="badge badge-bot">BOT</span>';
         }
 
-        if (env.metadata && env.metadata.to) {
+        if (env.metadata && env.metadata.private === 'true') {
+            el.classList.add('msg-whisper');
+            html += ' <span class="directed whisper-label">&#x1F512; whisper &rarr; ' + escHtml(env.metadata.to) + '</span>';
+        } else if (env.metadata && env.metadata.to) {
             html += ' <span class="directed">&rarr; ' + escHtml(env.metadata.to) + '</span>';
         }
 
