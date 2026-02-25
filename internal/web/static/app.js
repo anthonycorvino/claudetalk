@@ -100,8 +100,6 @@
     }
 
     // --- WebSocket ---
-    let wsHeartbeat = null;
-
     function connectWS() {
         const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const url = proto + '//' + window.location.host + '/ws/' + encodeURIComponent(room) + '?sender=' + encodeURIComponent(sender);
@@ -111,19 +109,11 @@
             console.log('WebSocket connected');
             // Catch up on any messages missed while disconnected.
             catchUpMessages();
-            // Heartbeat: send a ping every 30s to keep the connection alive through proxies.
-            if (wsHeartbeat) clearInterval(wsHeartbeat);
-            wsHeartbeat = setInterval(function () {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ _ping: true }));
-                }
-            }, 30000);
         };
 
         ws.onmessage = function (evt) {
             try {
                 const env = JSON.parse(evt.data);
-                if (env._ping) return; // ignore server-side pings
                 onMessage(env);
             } catch (e) {
                 console.error('Parse error:', e);
@@ -132,7 +122,6 @@
 
         ws.onclose = function () {
             console.log('WebSocket closed, reconnecting in 3s...');
-            if (wsHeartbeat) { clearInterval(wsHeartbeat); wsHeartbeat = null; }
             setTimeout(connectWS, 3000);
         };
 
