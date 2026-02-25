@@ -175,6 +175,17 @@ func (h *Handlers) SendMessage(w http.ResponseWriter, r *http.Request) {
 		req.Type = protocol.TypeText
 	}
 
+	// Auto-whisper: if sender is "X's Claude" and the message is marked private
+	// but has no explicit `to`, auto-route it to owner "X".
+	if req.Metadata["private"] == "true" && req.Metadata["to"] == "" &&
+		strings.HasSuffix(req.Sender, "'s Claude") {
+		owner := strings.TrimSuffix(req.Sender, "'s Claude")
+		if req.Metadata == nil {
+			req.Metadata = map[string]string{}
+		}
+		req.Metadata["to"] = owner
+	}
+
 	room := h.Hub.GetOrCreateRoom(roomName)
 	env := room.AddMessage(req.Sender, req.Type, req.Payload, req.Metadata)
 	writeJSON(w, http.StatusCreated, env)

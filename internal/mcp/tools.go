@@ -35,13 +35,14 @@ func RegisterTools(srv *mcpserver.MCPServer, client *HTTPClient) {
 	// 1. send_message
 	srv.AddTool(mcplib.Tool{
 		Name:        "send_message",
-		Description: "Send a message to the chatroom. Omit `to` for a public message visible to everyone. Set `to` to send a private whisper visible only to that user and yourself.",
+		Description: "Send a message. By default, messages are private whispers to your owner (the user who spawned you). Set broadcast=true to make a message visible to everyone in the room.",
 		InputSchema: mcplib.ToolInputSchema{
 			Type: "object",
 			Properties: map[string]any{
-				"text": prop("string", "The message text to send"),
-				"type": propEnum("string", "Message type: text (default), code, or diff", []string{"text", "code", "diff"}),
-				"to":   prop("string", "Optional: recipient name for a private message visible only to them"),
+				"text":      prop("string", "The message text to send"),
+				"type":      propEnum("string", "Message type: text (default), code, or diff", []string{"text", "code", "diff"}),
+				"to":        prop("string", "Optional: specific recipient name for a private whisper. Leave unset to whisper to your owner."),
+				"broadcast": prop("boolean", "Set true to send a public message visible to all room participants"),
 			},
 			Required: []string{"text"},
 		},
@@ -131,15 +132,17 @@ func makeSendMessageHandler(client *HTTPClient) mcpserver.ToolHandlerFunc {
 		text := request.GetString("text", "")
 		msgType := request.GetString("type", "text")
 		to := request.GetString("to", "")
+		broadcast := request.GetBool("broadcast", false)
 		if text == "" {
 			return mcplib.NewToolResultError("text is required"), nil
 		}
 
 		var metadata map[string]string
-		if to != "" {
-			metadata = map[string]string{
-				"to":      to,
-				"private": "true",
+		if !broadcast {
+			// Private whisper: explicit recipient or server will auto-infer owner.
+			metadata = map[string]string{"private": "true"}
+			if to != "" {
+				metadata["to"] = to
 			}
 		}
 
@@ -148,10 +151,14 @@ func makeSendMessageHandler(client *HTTPClient) mcpserver.ToolHandlerFunc {
 			return mcplib.NewToolResultError(fmt.Sprintf("failed to send: %v", err)), nil
 		}
 
-		if to != "" {
-			return mcplib.NewToolResultText(fmt.Sprintf("Private message sent to %s (seq #%d)", to, env.SeqNum)), nil
+		if broadcast {
+			return mcplib.NewToolResultText(fmt.Sprintf("Public message sent (seq #%d)", env.SeqNum)), nil
 		}
-		return mcplib.NewToolResultText(fmt.Sprintf("Message sent (seq #%d)", env.SeqNum)), nil
+		recipient := to
+		if recipient == "" {
+			recipient = "your owner"
+		}
+		return mcplib.NewToolResultText(fmt.Sprintf("Private message sent to %s (seq #%d)", recipient, env.SeqNum)), nil
 	}
 }
 
