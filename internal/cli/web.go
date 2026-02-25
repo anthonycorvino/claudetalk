@@ -374,9 +374,9 @@ func runWatcherConn(wsURL, room, sender, claudeName string, rnr *runner.Runner, 
 
 		go func() {
 			defer cancel()
-			defer rnr.Sessions().End(room, sender, convID)
 			defer func() {
-				// After session ends, replay any queued spawn for this conv_id.
+				// End the session first, then replay any queued spawn.
+				rnr.Sessions().End(room, sender, convID)
 				pendingMu.Lock()
 				pending := pendingSpawns[convID]
 				delete(pendingSpawns, convID)

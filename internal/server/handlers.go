@@ -53,8 +53,9 @@ func (s *hostHookState) trySpawn(req *protocol.SpawnReq) {
 
 	go func() {
 		defer cancel()
-		defer s.rnr.Sessions().End(s.room, s.sender, convID)
 		defer func() {
+			// End the session first, then replay any queued spawn.
+			s.rnr.Sessions().End(s.room, s.sender, convID)
 			s.mu.Lock()
 			pending := s.pendingSpawns[convID]
 			delete(s.pendingSpawns, convID)
